@@ -1,0 +1,37 @@
+{
+	"comment": "",
+	"ignore": "test",
+	"package": [
+		{
+			"checksumSHA1": "tK8eFmQ0JeKpR3P0TjiGobzlIh0=",
+			"path": "golang.org/x/net/bpf",
+			"revision": "f841c39de738b1d0df95b5a7187744f0e03d8112",
+			"revisionTime": "2016-06-30T00:53:42Z"
+		},
+		{
+			"checksumSHA1": "vU7M5xs/uYYjyKv+P8ZqQCT3LeI=",
+			"path": "golang.org/x/net/icmp",
+			"revision": "f841c39de738b1d0df95b5a7187744f0e03d8112",
+			"revisionTime": "2016-06-30T00:53:42Z"
+		},
+		{
+			"checksumSHA1": "yRuyntx9a59ugMi5NlN4ST0XRcI=",
+			"path": "golang.org/x/net/internal/iana",
+			"revision": "f841c39de738b1d0df95b5a7187744f0e03d8112",
+			"revisionTime": "2016-06-30T00:53:42Z"
+		},
+		{
+			"checksumSHA1": "BJrlL/vetMJZLv8XPuzvw3ZITaU=",
+			"path": "golang.org/x/net/ipv4",
+			"revision": "f841c39de738b1d0df95b5a7187744f0e03d8112",
+			"revisionTime": "2016-06-30T00:53:42Z"
+		},
+		{
+			"checksumSHA1": "oHDMN5yvCAux6ghrbdDYEyaOydo=",
+			"path": "golang.org/x/net/ipv6",
+			"revision": "f841c39de738b1d0df95b5a7187744f0e03d8112",
+			"revisionTime": "2016-06-30T00:53:42Z"
+		}
+	],
+	"rootPath": "github.com/kaey/ping"
+}
