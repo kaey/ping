@@ -19,46 +19,77 @@ var (
 	ErrTimeout     = errors.New("ping: timeout")
 )
 
+// Result is a result of a single ICMP roundtrip.
 type Result struct {
-	From     string // TODO: add from address
+	From     string        // TODO: fill this field with address we received ICMP packet from.
+	Type     ipv4.ICMPType // TODO: fill this field with received ICMP packet type.
 	Sent     time.Time
 	Received time.Time
 }
 
+// Pinger implements ping functions.
 type Pinger struct {
-	conn  *icmp.PacketConn
-	proto int
-	stop  chan struct{}
+	conn    *icmp.PacketConn
+	proto   int
+	stop    chan struct{}
+	limiter chan struct{}
 
 	mu    sync.Mutex
 	idMap []chan int
 }
 
+// New returns new pinger with specified local socket address.
 func New(laddr string) (*Pinger, error) {
 	c, err := icmp.ListenPacket("ip4:icmp", laddr)
 	if err != nil {
 		return nil, err
 	}
 
+	// TODO: add ipv6 support.
 	p := &Pinger{
-		conn:  c,
-		proto: ipv4.ICMPTypeEcho.Protocol(),
-		stop:  make(chan struct{}),
-		idMap: make([]chan int, 65536),
+		conn:    c,
+		proto:   ipv4.ICMPTypeEcho.Protocol(),
+		limiter: make(chan struct{}, 200), // TODO: make limiter size configurable?
+		stop:    make(chan struct{}),
+		idMap:   make([]chan int, 65536),
 	}
 
+	go p.limitRoutine()
 	go p.readRoutine()
 
 	return p, nil
 }
 
+// LimitRoutine manages limit of sent ICMP echo requests.
+// This is needed, because host can't accept replies fast enough.
+func (p *Pinger) limitRoutine() {
+	// TODO: make limiter refill interval configurable?
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			for i := 0; i < cap(p.limiter); i++ {
+				p.limiter <- struct{}{}
+			}
+		case <-p.stop:
+			return
+		}
+	}
+}
+
+// Close stops all pending requests and closes socket.
 func (p *Pinger) Close() error {
 	close(p.stop)
 	return p.conn.Close()
 }
 
-func (p *Pinger) Once(raddr string, timeout time.Duration) (rtt time.Duration, err error) {
-	result, err := p.Ping(raddr, timeout, 1, time.Millisecond)
+// Once sends single echo packet to raddr and returns round trip time.
+func (p *Pinger) Once(raddr string, deadline time.Duration) (rtt time.Duration, err error) {
+	// TODO: do something with deadline, because of p.limiter, write goroutine may
+	// not have a chance to send its ICMP echo packet.
+	result, err := p.Ping(raddr, deadline, 1, time.Millisecond)
 	if err != nil {
 		return 0, err
 	}
@@ -66,18 +97,11 @@ func (p *Pinger) Once(raddr string, timeout time.Duration) (rtt time.Duration, e
 	return result[0].Received.Sub(result[0].Sent), nil
 }
 
-func (p *Pinger) Multiple(raddr string, timeout time.Duration, count int, delay time.Duration) (rtt time.Duration, lost int, err error) {
-	result, err := p.Ping(raddr, timeout, count, delay)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	_ = result // FIXME
-
-	return 0, 0, nil
-}
-
+// Ping sends count echo requests to raddr with specified delay.
 func (p *Pinger) Ping(raddr string, deadline time.Duration, count int, delay time.Duration) ([]Result, error) {
+	// We start sequence num at 1, not 0, so increment count by 1.
+	count++
+
 	ip := net.ParseIP(raddr)
 	if ip == nil {
 		return nil, ErrInvalidAddr
@@ -93,15 +117,24 @@ func (p *Pinger) Ping(raddr string, deadline time.Duration, count int, delay tim
 		timeoutChan = timer.C
 		tickChan    = ticker.C
 		recvChan    = make(chan int)
-		result      = make([]Result, count+1)
+		result      = make([]Result, count)
 	)
 
 	id := p.newID(recvChan)
 	defer p.freeID(id)
 
-	for sent, received := 0, 0; sent < count || received < count; {
+	// Main loop.
+	sent, received := 1, 1
+	for {
+		if sent == count && received == count {
+			return result[1:], nil
+		}
 		select {
 		case seq := <-recvChan:
+			if seq == 0 || seq >= count {
+				log.Printf("ping: unexpected sequence num %v, raddr: %v, id %v", seq, raddr, id)
+				continue
+			}
 			result[seq].Received = time.Now()
 			received++
 		case <-p.stop:
@@ -109,22 +142,25 @@ func (p *Pinger) Ping(raddr string, deadline time.Duration, count int, delay tim
 		case <-timeoutChan:
 			return result, ErrTimeout
 		case now := <-tickChan:
-			seq := sent + 1
-			if err := p.write(ip, id, seq); err != nil {
-				return result, err
-			}
-			result[seq].Sent = now
+			go p.write(ip, id, sent)
+			result[sent].Sent = now
 			sent++
 			if sent == count {
 				tickChan = nil
 			}
 		}
 	}
-
-	return result[1:], nil
 }
 
-func (p *Pinger) write(ip net.IP, id, seq int) error {
+// Write sends echo request to host ip with specified id and seq.
+// It should be run in a separate goroutine.
+func (p *Pinger) write(ip net.IP, id, seq int) {
+	select {
+	case <-p.stop:
+		return
+	case <-p.limiter:
+	}
+
 	wm := icmp.Message{
 		Type: ipv4.ICMPTypeEcho,
 		Code: 0,
@@ -136,52 +172,78 @@ func (p *Pinger) write(ip net.IP, id, seq int) error {
 
 	wb, err := wm.Marshal(nil)
 	if err != nil {
-		return err
+		log.Println("ping: write: Marshal:", err)
+		return
 	}
 
 	if _, err := p.conn.WriteTo(wb, &net.IPAddr{IP: ip}); err != nil {
-		return err
+		log.Println("ping: write: WriteTo:", err)
+		return
 	}
-
-	return nil
 }
 
+// BufPool is a packet buffer for readRoutine.
+var bufPool = &sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 10000)
+	},
+}
+
+// ReadRoutine reads packets from socket and calls handleReply
+// in a separate goroutine for each one.
 func (p *Pinger) readRoutine() {
-	buf := make([]byte, 10000)
 	for {
 		select {
 		case <-p.stop:
 			return
 		default:
-			n, _, err := p.conn.ReadFrom(buf)
+			buf := bufPool.Get().([]byte)
+			n, addr, err := p.conn.ReadFrom(buf)
 			if err != nil {
-				log.Println("ping.ReadFrom:", err)
+				log.Println("ping: readRoutine: ReadFrom:", err)
+				bufPool.Put(buf)
 				continue
 			}
 
-			msg, err := icmp.ParseMessage(p.proto, buf[:n])
-			if err != nil {
-				log.Println("icmp.ParseMessage:", err)
-				continue
-			}
-
-			// FIXME: parse other icmp types
-			if msg.Type != ipv4.ICMPTypeEchoReply {
-				continue
-			}
-
-			id := msg.Body.(*icmp.Echo).ID
-			seq := msg.Body.(*icmp.Echo).Seq
-			p.mu.Lock()
-			ch := p.idMap[id]
-			p.mu.Unlock()
-			if ch != nil {
-				ch <- seq
-			}
+			go p.handleReply(addr, n, buf)
 		}
 	}
 }
 
+// HandleReply parses packet and sends event to main loop.
+func (p *Pinger) handleReply(addr net.Addr, n int, buf []byte) {
+	defer bufPool.Put(buf)
+	msg, err := icmp.ParseMessage(p.proto, buf[:n])
+	if err != nil {
+		log.Println("ping: handleReply: ParseMessage:", err)
+		return
+	}
+
+	// TODO: correctly parse icmp types
+	switch msg.Type {
+	case ipv4.ICMPTypeEchoReply:
+		// handle normally
+	case ipv4.ICMPTypeDestinationUnreachable, ipv4.ICMPTypeTimeExceeded:
+		// ignore for now
+		return
+	default:
+		log.Printf("ping: handleReply: addr: %v, unexpected message type: %v", addr, msg.Type)
+		return
+	}
+
+	id := msg.Body.(*icmp.Echo).ID
+	seq := msg.Body.(*icmp.Echo).Seq
+	p.mu.Lock()
+	ch := p.idMap[id]
+	p.mu.Unlock()
+	if ch != nil {
+		// TODO: there is a data race between this send and select in freeID().
+		ch <- seq
+	}
+}
+
+// NewID returns free ID to use in ICMP echo and assigns recvChan to this ID,
+// which is used by handleReply().
 func (p *Pinger) newID(recvChan chan int) int {
 	for {
 		p.mu.Lock()
@@ -198,6 +260,7 @@ func (p *Pinger) newID(recvChan chan int) int {
 	}
 }
 
+// FreeID frees used ID.
 func (p *Pinger) freeID(id int) {
 	p.mu.Lock()
 	ch := p.idMap[id]

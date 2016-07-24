@@ -1,10 +1,11 @@
 package main
 
 import (
-	"io/ioutil"
+	"bufio"
+	"flag"
+	"io"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,56 +13,41 @@ import (
 	"github.com/kaey/ping"
 )
 
+var (
+	count   = flag.Int("count", 0, "Send ping to only first count addresses.")
+	srcAddr = flag.String("src", "0.0.0.0", "Socket address")
+)
+
 func main() {
-	p, err := ping.New("0.0.0.0")
+	flag.Parse()
+	p, err := ping.New(*srcAddr)
 	if err != nil {
 		log.Fatalln(err)
 	}
 
-	count := 0
-	if len(os.Args) > 1 {
-		c, err := strconv.ParseInt(os.Args[1], 10, 64)
-		if err != nil {
-			log.Fatalln(err)
-		}
-		count = int(c)
-	}
-
-	data, err := ioutil.ReadFile("addr")
-	if err != nil {
-		log.Fatalln(err)
-	}
-
+	r := bufio.NewReader(os.Stdin)
 	wg := new(sync.WaitGroup)
-	lines := strings.Split(string(data), "\n")
-	result := make([]time.Duration, 0, len(lines))
+	var result []time.Duration
 	mu := sync.Mutex{}
-	ticker := time.NewTicker(1 * time.Millisecond) // TODO: move to lib
-	for i, line := range lines {
-		if i >= count {
-			break
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Fatalln("read stdin:", err)
 		}
-		<-ticker.C
+
 		wg.Add(1)
 		addr := strings.TrimSpace(line)
 		go func() {
 			defer wg.Done()
 
-			rtt, _ := p.Once(addr, 10*time.Second)
+			rtt, _ := p.Once(addr, 100*time.Second)
 
 			mu.Lock()
 			result = append(result, rtt)
 			mu.Unlock()
-
-			/*result, err := p.Ping(addr, 10*time.Second, 5, 5*time.Millisecond)
-			if err != nil {
-				log.Printf("%q: %v", addr, err)
-				return
-			}
-
-			for i, r := range result {
-				log.Printf("Addr: %v, Seq: %v, sent: %v, recv: %v\n", addr, i, r.Sent, r.Received)
-			}*/
 		}()
 	}
 	wg.Wait()
