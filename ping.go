@@ -1,3 +1,7 @@
+// Copyright 2016 Konstantin Kulikov. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 // Package ping implements ICMP ping functions.
 package ping
 
